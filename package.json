@@ -1,6 +1,6 @@
 {
   "name": "suite25519",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "Suite25519 is a cryptography module, featuring key algorithms like Curve25519, ed25519, x25519, ECIES, AES-GCM-SIV, and ECDSA. It provides essential functionalities for key management, digital signatures, and encryption, making it suitable for secure communications and data protection in various applications.",
   "type": "module",
   "main": "suite25519.js",
