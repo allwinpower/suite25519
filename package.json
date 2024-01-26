@@ -5,33 +5,33 @@
   "type": "module",
   "main": "suite25519.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
   },
-  "repository" : "https://github.com/boiler-limited/suite25519.git",
+  "jest": {
+    "transform": {},
+    "testEnvironment": "jest-environment-node"
+  },
+  "repository": "https://github.com/boiler-limited/suite25519.git",
   "keywords": [
-    "cryptography", 
-    "security", 
-    "encryption", 
-    "suite25519", 
-    "digital signatures", 
-    "public-key", 
-    "hashing", 
-    "JavaScript", 
-    "crypto", 
-    "data protection",
+    "cryptography",
     "Curve25519",
     "ed25519",
     "x25519",
     "ECIES",
     "AES-GCM-SIV",
     "ECDSA"
-  ],  
+  ],
   "author": "Boiler Limited",
   "license": "ISC",
   "dependencies": {
     "@noble/ciphers": "^0.4.1",
     "@noble/curves": "^1.3.0",
     "@noble/hashes": "^1.3.3",
+    "buffer": "^6.0.3",
+    "cbor": "^9.0.1",
     "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }

@@ -1,88 +1,25 @@
 import { ed25519, x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import { ripemd160 } from '@noble/hashes/ripemd160';
 import { siv } from '@noble/ciphers/aes';
-import { utf8ToBytes, bytesToUtf8, hexToBytes, bytesToHex } from '@noble/ciphers/utils';
-import { randomBytes } from 'crypto';
+import { utf8ToBytes } from '@noble/ciphers/utils';
+import { randomBytes, sign } from 'crypto';
+import cbor from 'cbor';
 
-//This function converts a byte array to a Base64 URL encoded string.
-function bytesToBase64(bytes) {
-    let base64;
-    if (typeof Buffer === 'function') {
-        // Node.js environment
-        base64 = Buffer.from(bytes).toString('base64');
-    } else {
-        // Browser environment
-        const binaryString = new Uint8Array(bytes).reduce((acc, byte) => acc + String.fromCharCode(byte), '');
-        base64 = window.btoa(binaryString);
+const assertType = (variableObj, type) => {
+    const [variableName, variable] = Object.entries(variableObj)[0];
+    if (typeof variable !== type && !(variable instanceof type)) {
+        throw new Error(`${variableName} is not an instance of [${type.name || type}].`);
     }
-    return base64;
-}
+};
 
-//This function converts a Base64 URL encoded string back to a byte array.
-function Base64ToBytes(base64url) {
-    //return hexToBytes(base64url);
-    let binaryString;
-    base64url = base64url.replace(/-/g, '+').replace(/_/g, '/');
-
-    if (typeof Buffer === 'function') {
-        // Node.js environment
-        binaryString = Buffer.from(base64url, 'base64').toString('binary');
-    } else {
-        // Browser environment
-        binaryString = window.atob(base64url);
-    }
-
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-
-    return bytes;
-}
-
-function stringToBase64(str) {
-    return bytesToBase64(utf8ToBytes(str)); // Reuse your existing bytesToBase64 function
-}
-
-function base64ToString(base64url) {
-    const bytes = Base64ToBytes(base64url); // Reuse your existing Base64ToBytes function
-
-    if (typeof TextDecoder === 'function') {
-        // Browser environment
-        return new TextDecoder().decode(bytes);
-    } else {
-        // Node.js environment
-        return Buffer.from(bytes).toString();
-    }
-}
-
-function validatePublicKeyObject(publicKeyObject) {
-    let publicKey, sig, valid;
-
-    try {
-        publicKey = hexToBytes(publicKeyObject.P);
-    }
-    catch (error) {
-        throw new Error(`publicKeyObject.P ${error?.message}`);
-    }
-
-    try {
-        sig = hexToBytes(publicKeyObject.Sig);
-    }
-    catch (error) {
-        throw new Error(`publicKeyObject.Sig ${error?.message}`);
-    }
-
-    try {
-        valid = ed25519.verify(sig, publicKey, publicKey, { zip215: false }); // RFC8032 / FIPS 186-5
-    }
-    catch (error) {
-        throw new Error(`ed25519.verify ${error?.message}`);
-    }
-
-    if (!valid) {
-        throw new Error('ed25519.verify Invalid Signature');
-    }
+function alignBy4(input) {
+    const misalignment = input.byteOffset % 4;
+    if (misalignment === 0) return input;
+    const u32Size = input.length + (misalignment === 0 ? 0 : 4 - misalignment);
+    const uint32 = new Uint32Array(u32Size / 4);
+    const uint8 = new Uint8Array(uint32.buffer);
+    uint8.set(input);
+    return uint8;
 }
 
 function eciesEncrypt(receiverPublicKeyEd, messageBinary) {
@@ -117,8 +54,12 @@ function eciesEncrypt(receiverPublicKeyEd, messageBinary) {
     }
 }
 
-export function eciesDecrypt(receiverPrivateKeyEd, ephemeralPublicKeyX, nonce, ciphertext) {
+function eciesDecrypt(receiverPrivateKeyEd, ephemeralPublicKeyX, nonce, ciphertext) {
     try {
+        ephemeralPublicKeyX = alignBy4(ephemeralPublicKeyX);
+        nonce = alignBy4(nonce);
+        ciphertext = alignBy4(ciphertext);
+
         const receiverPrivateKeyX = edwardsToMontgomeryPriv(receiverPrivateKeyEd);
         // Derive shared secret
         const sharedSecret = x25519.getSharedSecret(receiverPrivateKeyX, ephemeralPublicKeyX);
@@ -132,6 +73,7 @@ export function eciesDecrypt(receiverPrivateKeyEd, ephemeralPublicKeyX, nonce, c
         try {
             plaintext = aes.decrypt(ciphertext);
         } catch (error) {
+            console.log('eciesDecrypt', error);
             throw new Error('Decryption failed');
         }
 
@@ -142,23 +84,24 @@ export function eciesDecrypt(receiverPrivateKeyEd, ephemeralPublicKeyX, nonce, c
     }
 }
 
-export class BinaryData {
+class BinaryData {
 
     constructor(data) {
         this.data = data;
     }
 
-    static fromBase64(encodedData) {
-        const data = Base64ToBytes(encodedData);
-        if (this.objectIdentifier) {
-            return new this(data);
+    static fromBase64(base64) {
+        const data = cbor.decode(Buffer.from(base64, 'base64'));
+        //console.log('DEBUG IMPORT:', data);
+        if (data[this.objectIdentifier]) {
+            return new this(data[this.objectIdentifier]);
         }
-        throw new Error('Unsupported type for fromString method.');
+        throw new Error('Unsupported type for method.');
     }
 
     static fromObject(object) {
         if (object && this.objectIdentifier && object[this.objectIdentifier]) {
-            const data = Base64ToBytes(object[this.objectIdentifier]);
+            const data = Buffer.from(object[this.objectIdentifier], 'base64');
             return new this(data);
         } else {
             throw new Error(`Invalid object format for ${this.name}.`);
@@ -169,8 +112,14 @@ export class BinaryData {
         return this.data;
     }
 
+    #toCbor() {
+        const obj = {};
+        obj[this.constructor.objectIdentifier] = this.toBinary();
+        return cbor.encode(obj);
+    }
+
     toBase64() {
-        return bytesToBase64(this.data);
+        return Buffer.from(this.#toCbor()).toString('base64');
     }
 
     toObject() {
@@ -196,17 +145,50 @@ class Cipher extends BinaryData {
     static objectIdentifier = 'C';
 }
 
-export class CipherEnvelope {
+class Signature extends BinaryData {
+    static objectIdentifier = 's';
+}
 
-    constructor(ephemeralPublicKey, nonce, cipher) {
+class Message extends BinaryData {
+    static objectIdentifier = 'm';
+
+    constructor(data) {
+        if (data instanceof Uint8Array) {
+            super(data);
+        } else if (typeof data === 'string') {
+            super(Buffer.from(data, 'utf8'));
+        } else {
+            // Include the type of the invalid data in the error message
+            let dataType = typeof data;
+            if (data && typeof data === 'object') {
+                dataType = data.constructor.name; // More specific type for objects
+            }
+            throw new Error(`Invalid data type for Message: ${dataType}`);
+        }
+    }
+
+    static randomBytes(length) {
+        return new Message(randomBytes(length));
+    }
+
+    toString() {
+        return Buffer.toString(this.data);
+    }
+}
+
+class CipherEnvelope {
+
+    constructor(ephemeralPublicKey, nonce, cipher, signature, publicKey) {
         this.ephemeralPublicKey = ephemeralPublicKey;
         this.nonce = nonce;
         this.cipher = cipher;
+        this.signature = signature;
+        this.publicKey = publicKey;
     }
 
     static fromBase64(base64Envelope) {
         try {
-            const jsonEnvelope = base64ToString(base64Envelope);
+            const jsonEnvelope = Buffer.from(base64Envelope, 'base64');
             const objectEnvelope = JSON.parse(jsonEnvelope);
             return CipherEnvelope.fromObject(objectEnvelope);
         }
@@ -228,11 +210,7 @@ export class CipherEnvelope {
         }
     }
 
-    toBase64() {
-        return stringToBase64(JSON.stringify(this.toObject()));
-    }
-
-    toObject() {
+    #toObject() {
         return {
             ...this.ephemeralPublicKey.toObject(),
             ...this.nonce.toObject(),
@@ -240,153 +218,70 @@ export class CipherEnvelope {
         };
     }
 
+    toBase64() {
+        return stringToBase64(JSON.stringify(this.#toObject()));
+    }
+
     toJSON() {
-        return this.toObject();
+        return this.#toObject();
     }
 }
 
-export class Message extends BinaryData {
-    static objectIdentifier = 'm';
+export class PrivateKey extends BinaryData {
+    static objectIdentifier = 'k';
 
-    static load(message) {
-        let data;
-        if (message instanceof Message) {
-            // Message is already an instance of Message, use its binary data
-            data = message.message;
-        } else if (message instanceof Uint8Array) {
-            // Data is already in binary format, use it as is
-            data = message;
-        } else if (typeof message === 'object' || Array.isArray(message)) {
-            // Data is an object or array, convert to JSON string and then encode
-            const jsonString = JSON.stringify(message);
-            data = utf8ToBytes(jsonString);
-        } else if (typeof message === 'string') {
-            // Data is a string, encode it
-            data = utf8ToBytes(message);
-        } else {
-            // Unsupported data type
-            throw new Error('Invalid data type for message. Expected Uint8Array, object, array, string, or Message.');
+    static randomPrivateKey() {
+        return new PrivateKey(ed25519.utils.randomPrivateKey());
+    }
+
+    get publicKey() {
+        const publicKeyData = ed25519.getPublicKey(this.data);
+        return new PublicKey(publicKeyData);
+    }
+
+    get publicKeyEnvelope() {
+        return PublicKeyEnvelope.sign(this.publicKey, this);
+    }
+
+    decrypt(envelope) {
+        if (!(envelope instanceof CipherEnvelope)) {
+            throw new Error("The provided object is not an instance of Envelope.");
         }
-        return new Message(data);
-    }
-
-    static randomBytes(length) {
-        return new Message(randomBytes(length));
-    }
-
-    toString() {
-        return bytesToUtf8(this.data);
-    }
-}
-
-export class Signature extends BinaryData {
-    static objectIdentifier = 's';
-}
-
-export class EncryptedSignedEnvelope {
-    constructor(cipher, signature, publicKey) {
-        this.cipher = cipher;
-        this.signature = signature;
-        this.publicKey = publicKey;
-    }
-
-    verify() {
         try {
-            return this.publicKey.verify(Message.load(this.cipher.toBase64()), this.signature);
+            const m = eciesDecrypt(
+                this.toBinary(),
+                envelope.ephemeralPublicKey.toBinary(),
+                envelope.nonce.toBinary(),
+                envelope.cipher.toBinary()
+            );
+            return new Message(m);
         }
         catch (error) {
             throw error;
         }
     }
 
-    decrypt(privateKey) {
-        if (!(privateKey instanceof PrivateKey)) {
-            throw new Error("The provided object is not an instance of PrivateKey.");
-        }
-        try {
-            if (this.verify()) {
-                return privateKey.decrypt(this.cipher);
-
-            }
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    static encrypt(data, privateKey, publicKey) {
-        if (!(data instanceof Message)) {
+    sign(message) {
+        if (!(message instanceof Message)) {
             throw new Error("The provided object is not an instance of Message.");
         }
+        const sigData = ed25519.sign(message.toBinary(), this.data);
 
-        const cipherData = publicKey.encrypt(data);
-        const signedCipher = privateKey.sign(Message.load(cipherData.toBase64()));
-
-        return new EncryptedSignedEnvelope(
-            cipherData,
-            signedCipher,
-            publicKey
-        );
-
-    }
-
-    static fromBase64(base64Envelope) {
-        try {
-            const jsonEnvelope = base64ToString(base64Envelope);
-            const objectEnvelope = JSON.parse(jsonEnvelope);
-            return EncryptedSignedEnvelope.fromObject(objectEnvelope);
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    static fromObject(object) {
-        try {
-            return new EncryptedSignedEnvelope(
-                CipherEnvelope.fromObject(object),
-                Signature.fromObject(object),
-                PublicKey.fromObject(object)
-            );
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    toBase64() {
-        return stringToBase64(JSON.stringify(this.toObject()));
-    }
-
-    toObject() {
-        return {
-            ...this.cipher.toObject(),
-            ...this.publicKey.toObject(),
-            ...this.signature.toObject()
-        };
+        return new Signature(sigData);
     }
 
     toJSON() {
-        return this.toObject();
+        return {
+            k: this.toBase64()
+        };
     }
 }
 
 export class PublicKey extends BinaryData {
     static objectIdentifier = 'P';
 
-    static loadKey(encodedPublicKey) {
-        // Logic to validate and load keyData
-        try {
-            const keyData = Base64ToBytes(encodedPublicKey);
-            return new PrivateKey(keyData);
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
     get id() {
-        return bytesToHex(ripemd160(this.toBinary()));
+        return Buffer.from(ripemd160(this.toBinary())).toString('hex');
     }
 
     verify(data, signature) {
@@ -422,129 +317,189 @@ export class PublicKey extends BinaryData {
     }
 }
 
-export class PublicKeyEnvelope {
-
-    constructor(publicKey, signature) {
-        this.publicKey = publicKey;
-        this.signature = signature;
-    }
-
-    verify() {
-        try {
-            // Wrap public key in a message object
-            const msg = new Message(this.publicKey.toBinary());
-            return this.publicKey.verify(msg, this.signature);
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    static fromBase64(base64Envelope) {
-        try {
-            const jsonEnvelope = base64ToString(base64Envelope);
-            const objectEnvelope = JSON.parse(jsonEnvelope);
-            return PublicKeyEnvelope.fromObject(objectEnvelope);
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    static fromObject(object) {
-        try {
-            return new PublicKeyEnvelope(
-                PublicKey.fromObject(object),
-                Signature.fromObject(object)
-            );
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
+/* New version */
+class baseEnvelope {
     toBase64() {
-        return stringToBase64(JSON.stringify(this.toObject()));
+        return Buffer.from(JSON.stringify(this.toObject())).toString('base64');
+    }
+}
+
+class SignatureEnvelope extends baseEnvelope {
+    #signature;
+    constructor(signature) {
+        super();
+        if (!(signature instanceof Signature)) {
+            throw new Error(`signature[${signature.constructor.name}] is not an instance of [Signature].`);
+        }
+        this.#signature = signature;
     }
 
     toObject() {
         return {
-            ...this.publicKey.toObject(),
-            ...this.signature.toObject()
+            s: this.#signature.toBase64()
         };
-    }
-
-    toJSON() {
-        return this.toObject();
     }
 }
 
-export class PrivateKey extends BinaryData {
-    static objectIdentifier = 'k';
-
-    static new() {
-        // Logic to generate a new key
-        const keyData = ed25519.utils.randomPrivateKey();
-        return new PrivateKey(keyData);
-    }
-
-    static loadKey(encodedPrivateKey) {
-        // Logic to validate and load keyData
-        try {
-            const keyData = Base64ToBytes(encodedPrivateKey);
-            return new PrivateKey(keyData);
+class SignaturePublicKeyEnvelope extends SignatureEnvelope {
+    #publicKey;
+    constructor(signature, publicKey) {
+        super(signature);
+        if (!(publicKey instanceof PublicKey)) {
+            throw new Error(`publicKey[${publicKey.constructor.name}] is not an instance of [PublicKey].`);
         }
-        catch (error) {
-            throw error;
-        }
+        this.#publicKey = publicKey;
     }
 
-    get publicKey() {
-        const publicKeyData = ed25519.getPublicKey(this.data);
-        return new PublicKey(publicKeyData);
-    }
-
-    get publicKeyEnvelope() {
-        // Wrap public key in message object before signing
-        const msg = new Message(this.publicKey.toBinary());
-        const sig = this.sign(msg);
-        return new PublicKeyEnvelope(this.publicKey, sig);
-    }
-
-    decrypt(envelope) {
-        if (!(envelope instanceof CipherEnvelope)) {
-            throw new Error("The provided object is not an instance of Envelope.");
-        }
-        try {
-            const m = eciesDecrypt(
-                this.toBinary(),
-                envelope.ephemeralPublicKey.toBinary(),
-                envelope.nonce.toBinary(),
-                envelope.cipher.toBinary()
-            );
-            return new Message(m);
-        }
-        catch (error) {
-            throw error;
-        }
-    }
-
-    sign(message) {
-        if (!(message instanceof Message)) {
-            throw new Error("The provided object is not an instance of Message.");
-        }
-        const sigData = ed25519.sign(message.toBinary(), this.data);
-
-        return new Signature(sigData);
-    }
-
-    toBase64() {
-        return bytesToBase64(this.data);
-    }
-
-    toJSON() {
+    toObject() {
         return {
-            k: this.toBase64()
+            ...super.toObject(),
+            ...this.#publicKey.toObject()
         };
+    }
+}
+
+class EciesEnvelope extends baseEnvelope {
+    #ephemeralPublicKey;
+    #cipher;
+    #nonce;
+
+    constructor(cipher, nonce, ephemeralPublicKey) {
+        super();
+        if (!(ephemeralPublicKey instanceof EphemeralPublicKey)) {
+            throw new Error(`ephemeralPublicKey[${ephemeralPublicKey.constructor.name}] is not an instance of [EphemeralPublicKey].`);
+        }
+        if (!(cipher instanceof Cipher)) {
+            throw new Error(`cipher[${cipher.constructor.name}] is not an instance of [Cipher].`);
+        }
+        if (!(nonce instanceof Nonce)) {
+            throw new Error(`nonce[${nonce.constructor.name}] is not an instance of [Nonce].`);
+        }
+        this.#ephemeralPublicKey = ephemeralPublicKey;
+        this.#cipher = cipher;
+        this.#nonce = nonce;
+    }
+
+    toObject() {
+        return {
+            ...this.#ephemeralPublicKey.toObject(),
+            ...this.#cipher.toObject(),
+            ...this.#nonce.toObject()
+        };
+    }
+}
+
+export const signMessage = (plainMessage, signingPrivateKey, includeMessage = false, includeSenderPublicKey = false) => {
+    try {
+        assertType({ signingPrivateKey }, PrivateKey);
+        assertType({ includeMessage }, 'boolean');
+        assertType({ includeSenderPublicKey }, 'boolean');
+
+        const message = new Message(plainMessage);
+        const messageBinary = message.toBinary();
+
+        const result = {
+            sig: ed25519.sign(messageBinary, signingPrivateKey.toBinary()),
+            ...(includeMessage && { m: messageBinary }),
+            ...(includeSenderPublicKey && { P: signingPrivateKey.publicKey.toBinary() })
+        };
+
+        return Buffer.from(cbor.encode(result));
+    }
+    catch (error) {
+        throw error;
+    }
+}
+export const verifyMessage = (signedMessage, senderPublicKey) => {
+    assertType({ senderPublicKey }, PublicKey);
+
+    const { sig, m, P } = cbor.decode(signedMessage);
+
+    if (!senderPublicKey) {
+        throw new Error('senderPublicKey is required');
+    }
+
+    // If P is provided, verify that its id matches senderPublicKey's id
+    if (P && new PublicKey(P).id !== senderPublicKey.id) {
+        throw new Error('Public key id does not match P');
+    }
+
+    const message = new Message(m);
+    const signature = new Signature(sig);
+
+    if (!senderPublicKey.verify(message, signature)) {
+        throw new Error('Invalid signature');
+    }
+
+    return message.toBinary();
+};
+
+export const encryptMessage = (plainMessage, recipientPublicKey) => {
+    try {
+        assertType({ recipientPublicKey }, PublicKey);
+
+        const message = new Message(plainMessage);
+        const cipher = eciesEncrypt(recipientPublicKey.toBinary(), message.toBinary());
+
+        return Buffer.from(cbor.encode(cipher));
+    }
+    catch (error) {
+        throw error;
+    }
+}
+
+export const decryptMessage = (cipher, recipientPrivateKey) => {
+    try {
+        assertType({ recipientPrivateKey }, PrivateKey);
+
+        let { C, P_e, N } = cbor.decode(cipher);
+
+        const message = eciesDecrypt(recipientPrivateKey.toBinary(), P_e, N, C);
+        return Buffer.from(message);
+    }
+    catch (error) {
+        throw error;
+    }
+
+}
+
+export const signAndEncryptMessage = (plainMessage, signingPrivateKey, recipientPublicKey, includeSenderPublicKey) => {
+    try {
+        assertType({ signingPrivateKey }, PrivateKey);
+        assertType({ recipientPublicKey }, PublicKey);
+        assertType({ includeSenderPublicKey }, 'boolean');
+
+        const Sig_m = signMessage(plainMessage, signingPrivateKey, true, includeSenderPublicKey);
+        return Buffer.from(encryptMessage(Sig_m, recipientPublicKey));
+    }
+    catch (error) {
+        throw error;
+    }
+}
+
+export const decryptAndVerifyMessage = (cipher, recipientPrivateKey, senderPublicKey) => {
+    try {
+        assertType({ recipientPrivateKey }, PrivateKey);
+        assertType({ senderPublicKey }, PublicKey);
+
+        const Sig_m = decryptMessage(cipher, recipientPrivateKey);
+        const { sig, m, P } = cbor.decode(Sig_m);
+
+        const message = new Message(m);
+        const signature = new Signature(sig);
+        const publicKey = new PublicKey(P);
+
+        if (publicKey.id !== senderPublicKey.id) {
+            throw new Error('Invalid sender public key');
+        }
+
+        if (!publicKey.verify(message, signature)) {
+            throw new Error('Invalid signature');
+        }
+
+        return message.toBinary();
+    }
+    catch (error) {
+        throw error;
     }
 }
